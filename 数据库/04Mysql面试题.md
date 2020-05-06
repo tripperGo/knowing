@@ -79,5 +79,137 @@
 
 ## 索引失效的几种情况
 
-- 前导模糊查询。%xx或者%xx%
-- -Dspring.config.location=classpath:/application-dev.properties -Dapollo.configService=http://39.106.35.121/dev -Denv=dev
+- 表数据。
+
+|  id  | name | age  |   pos   |      add_time       |
+| :--: | :--: | :--: | :-----: | :-----------------: |
+|  1   |  z3  |  22  | manager | 2020-05-06 13:42:27 |
+|  2   | July |  23  |   dev   | 2020-05-06 13:42:27 |
+|  3   | Bob  |  24  |   dev   | 2020-05-06 13:42:27 |
+|  4   | Tom  |  25  |   dev   | 2020-05-06 13:42:27 |
+|  5   | 111  |  26  |   dev   | 2020-05-06 13:42:27 |
+
+- id是主键，pos是单独的索引，name和age是多列索引（复合索引）
+|  索引名  |    列     |
+| :------: | :-------: |
+| PRIMARY  |    id     |
+|  O_pos   |    pos    |
+| O_duolie | NAME, age |
+
+  
+
+### 1 查询条件存在or
+
+- 正常情况下
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME = "July";
+  
+  rows: 1;  // 索引生效、只查询了一条
+      
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME = "July" AND 1 = 1;
+  rows: 1; // 索引生效、只查询了一条
+  ```
+
+- 使用or
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE "July" OR 1 = 1;
+  rows: 5; //索引失效，扫描全表
+      
+  // 特殊的，如果or的所有条件都加入索引，那么也可以生效
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE "July" OR id = 2;
+  rows: 2; //索引生效
+  ```
+
+### 2 多列索引
+
+- 对于多列索引，如果使用的不是第一部分，那么也会失效
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE age=22;
+  rows: 5; // 索引失效，扫描全表
+```
+  
+
+### 3 左模糊查询
+
+- 如果模糊查询是左模糊，那么索引也会失效。原因是MySQL采用的b-tree作为索引结构，b-tree最左前缀原则要求前缀必须是明确的，否则b-tree索引失效。
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE 'July';
+  rows: 1; // 索引生效
+  
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE '%uly';
+  rows: 5; // 索引失效--左模糊
+  
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE 'Jul%';
+  rows: 1; // 索引生效--右模糊
+  
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE '%ul%';
+  rows: 5; // 索引失效--全模糊
+  ```
+
+### 6 字符串类型
+
+- 如果某列（name）属性是varchar类型，即使这一列存储了一些数值类型（111），那么也一定要用引号引起来，否则索引会失效
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE name = '111';
+  rows: 1; // 索引生效
+  
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME = 111;
+  rows: 5; // 索引失效
+  ```
+
+### 7 函数
+
+- 不在索引列上做任何操作（计算、函数、类型转换）等，否则会索引失效而导致全表扫描。
+
+  ```java
+  EXPLAIN SELECT * FROM `staffs` WHERE NAME LIKE 'July';
+  rows: 1; // 索引生效
+  
+  EXPLAIN SELECT * FROM `staffs` WHERE LEFT(NAME, 4) = 'July';
+  rows: 5; // 索引失效
+  ```
+
+### 8 不等于
+
+- mysql 会一直向右匹配直到遇到范围查询（>、<、between、like）就停止匹配。范围列可以用到索引，但是范围列后面的列无法用到索引。即，索引最多用于一个范围列，因此如果查询条件中有两个范围列则无法全用到索引。
+
+### 9 is null
+
+- 使用**is null **或者**is not null**也会导致索引失效
+
+## 数据库优化建议
+
+### 1 少用运算
+
+- 如果在查询条件中含有函数或者表达式，将导致索引失效而进行全表扫描
+
+  ```java
+  select * from user where YEAR(birthday) < 1990;
+  
+  // 可以改造成
+  
+  select * from users where birthday < '1990-01-01';
+  ```
+
+### 2 默认值不为NULL
+
+- 只要列中含有NULL值、都将不会被包含在索引中，复合索引中只要一列含有NULL值，那么这一列对于此复合索引就是无效的。所以在数据库设计时不要让字段的默认值设置为NULL。
+
+### 3 索引列选择
+
+- 尽量选择区分度高的列作为索引。区分度公式：
+
+  ```java
+  count(distinct col) / count(*);
+  ```
+
+  表示字段不重复的比例，值越大说明不重复的数据越多，唯一索引（id）的区分度为1，而一些状态（status）、性别（sex）的值一般就俩，在大数据面前区分度就是0。一般来说join的字段要求区分度为0.1以上，也就是平均查询一条记录扫描10条记录以内。
+
+### 4 多使用覆盖索引
+
+- 如果一个索引包含所有需要的查询所需要的字段，则称之为覆盖索引。覆盖索引能够极大的提升性能，理想情况下，我们只需要读取索引、无需读表就可以获取结果，极大减少了数据访问量。
